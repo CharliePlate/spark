@@ -1,27 +1,37 @@
 "use strict";
-const tags = ["a", "div", "h1", "p", "button", "h2"];
 let scopes = {};
 window.scopes = scopes;
-for (const tag of tags) {
-    window[tag] = (...children) => {
-        const newTag = new HtmlTag(tag, ...children.map((child) => {
-            if (typeof child === "string") {
-                const t = new HtmlTag(tag, []);
-                t.text = child;
-                return t;
-            }
-            return child;
-        }));
-        newTag.create();
-        return newTag;
-    };
-    window[`$${tag}`] = (...children) => {
-        return ReactiveHtmlTag.create(() => {
-            const newTag = new ReactiveHtmlTag(tag, ...children);
+const tagsList = [
+    "a",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "p",
+    "button",
+    "img",
+];
+const makeTags = () => {
+    for (const tag of tagsList) {
+        window[tag] = (...children) => {
+            const newTag = new HtmlTag(tag, ...children);
             newTag.create();
             return newTag;
-        });
-    };
+        };
+        window[`$${tag}`] = (...children) => {
+            return ReactiveHtmlTag.create(() => {
+                const newTag = new ReactiveHtmlTag(tag, ...children);
+                newTag.create();
+                return newTag;
+            });
+        };
+    }
+};
+makeTags();
+function isReactive(tag) {
+    return tag.reactive;
 }
 class HtmlTag {
     element;
@@ -72,10 +82,13 @@ class HtmlTag {
             child.parent = this;
         }
     }
+    // Does not clear the scopes of the children. If using destroy with potential reactive children,
+    // ensure scopes are handled properly
     destroy() {
         while (this.element.firstChild) {
             this.element.removeChild(this.element.firstChild);
         }
+        this.element.remove();
     }
     handle(handlerType, handler) {
         this.element.addEventListener(handlerType, () => handler(this));
@@ -86,12 +99,15 @@ class HtmlTag {
         return this;
     }
     class(className) {
+        if (className === "") {
+            return this;
+        }
         this.element.classList.add(className);
         return this;
     }
 }
 class ReactiveHtmlTag extends HtmlTag {
-    tagMethod;
+    renderFunc;
     scopes;
     constructor(type, ...children) {
         super(type, ...children);
@@ -100,7 +116,7 @@ class ReactiveHtmlTag extends HtmlTag {
     }
     static create(tagMethod) {
         const tag = tagMethod();
-        tag.tagMethod = tagMethod;
+        tag.renderFunc = tagMethod;
         return tag;
     }
     react() {
@@ -109,7 +125,7 @@ class ReactiveHtmlTag extends HtmlTag {
                 child.clearChildScopes();
             }
         }
-        const newElement = ReactiveHtmlTag.create(this.tagMethod);
+        const newElement = ReactiveHtmlTag.create(this.renderFunc);
         this.children = newElement.children;
         this.element.replaceChildren(...newElement.children.map((child) => {
             if (child instanceof ReactiveHtmlTag) {
@@ -154,17 +170,12 @@ class ReactiveHtmlTag extends HtmlTag {
             let lastReactParent = this;
             let next = this;
             while (next.parent !== null) {
-                if (next.reactive) {
+                if (isReactive(next)) {
                     lastReactParent = next;
                 }
                 next = next.parent;
             }
-            if (lastReactParent !== this) {
-                lastReactParent.react();
-            }
-            else {
-                console.error("No parent to react");
-            }
+            lastReactParent.react();
         };
         this.element.addEventListener(handlerType, cb);
         return this;
@@ -185,41 +196,47 @@ class ReactiveHtmlTag extends HtmlTag {
 class Router {
     routes;
     mounted;
+    path;
+    mountedRoute;
+    SLUG_FALLBACK;
     constructor(routes) {
+        this.SLUG_FALLBACK = "$$Slug";
         this.routes = routes;
-        this.mounted = routes["/"]
-            ? routes["/"]()
-            : routes["404"]
-                ? routes["404"]()
-                : div("404 Not Found");
-        const hashChangeEvent = new HashChangeEvent("hashchange", {
-            newURL: "/",
-            oldURL: "",
-        });
-        window.dispatchEvent(hashChangeEvent);
         window.addEventListener("hashchange", () => {
+            this.path = window.location.hash.slice(1);
             this.route();
         });
+        this.path = window.location.hash.slice(1);
+        if (!this.path && this.routes["/"]) {
+            this.path = "/";
+            this.mountedRoute = "/";
+        }
+        this.mounted = this.routes[this.path]
+            ? this.routes[this.path]()
+            : this.routes[404]
+                ? this.routes[404]()
+                : div("404 Not Found");
     }
     route() {
-        const path = window.location.hash.slice(1);
         scopes = {};
-        if (this.routes[path]) {
+        if (this.routes[this.path]) {
             this.mounted.destroy();
-            this.mounted = this.routes[path]();
-            this.mounted.create();
+            this.mounted = this.routes[this.path]();
         }
         else {
             this.mounted.destroy();
             this.mounted = this.routes["404"]
                 ? this.routes["404"]()
                 : div("404 Not Found");
-            this.mounted.create();
         }
         document.getElementById("main").appendChild(this.mounted.element);
     }
-    mount(element) {
-        this.mounted = element;
+    createNestedRoutes() {
+        for (const route of Object.keys(this.routes)) {
+            const split = route.split("/");
+            for (const path in split) {
+            }
+        }
     }
 }
 const withRouter = (routes) => {
@@ -227,16 +244,21 @@ const withRouter = (routes) => {
     return router.mounted;
 };
 let count = 0;
+let shouldRotate = false;
 const results = withRouter({
-    "/": () => div(div(() => {
+    "/": () => div(div($div(() => [`The Current Count is ${count}`]).scope("count"), $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
+        count++;
+    })), $div(() => {
         return [
-            $div(() => [`The Current Count is ${count}`]).scope("count"),
-            $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
-                count++;
-            }),
+            $img()
+                .attr("src", "https://picsum.photos/200/300")
+                .$$handle(["rotate"], "click", () => {
+                shouldRotate = !shouldRotate;
+            })
+                .class(shouldRotate ? "rotate" : ""),
         ];
-    }), div(a("click me to go to test").attr("href", "#/test")).class("red"), $div(() => [`Distant Count ${count}`]).scope("count")),
+    }).scope("rotate"), a("Nav to test").attr("href", "#/test"), $div(() => [`this is my count ${count}`]).scope("count")),
     "/test": () => div("test", a("Nav to home").attr("href", "#/"), a("Go to something unknown").attr("href", "#/unknown"), `${count}`).class("flex"),
-    "404": () => div("This is what it would be like if there was a custom 404 page", div(a("Go home").attr("href", "/"))),
+    "404": () => div("This is what it would be like if there was a custom 404 page", div(a("Go home").attr("href", "#/"))),
 });
 document.getElementById("main").appendChild(results.element);

@@ -1,58 +1,41 @@
-declare function div(
-  ...children: (HtmlTag | string | (() => (HtmlTag | string)[]))[]
-): HtmlTag;
-declare function a(
-  ...children: (HtmlTag | string | (() => (HtmlTag | string)[]))[]
-): HtmlTag;
-declare function h1(
-  ...children: (HtmlTag | string | (() => (HtmlTag | string)[]))[]
-): HtmlTag;
-declare function p(
-  ...children: (HtmlTag | string | (() => (HtmlTag | string)[]))[]
-): HtmlTag;
-declare function button(
-  ...children: (HtmlTag | string | (() => (HtmlTag | string)[]))[]
-): HtmlTag;
-declare function $div(children: () => (HtmlTag | string)[]): ReactiveHtmlTag;
-declare function $a(children: () => (HtmlTag | string)[]): ReactiveHtmlTag;
-declare function $h1(children: () => (HtmlTag | string)[]): ReactiveHtmlTag;
-declare function $p(children: () => (HtmlTag | string)[]): ReactiveHtmlTag;
-declare function $button(children: () => (HtmlTag | string)[]): ReactiveHtmlTag;
-
-type Tag = "a" | "div" | "h1" | "p" | "button" | "h2" | "simpleText";
-type Handlers = { [handler: string]: (event: Event) => void };
-
-const tags: Tag[] = ["a", "div", "h1", "p", "button", "h2"];
-
 let scopes: Record<string, Set<ReactiveHtmlTag>> = {};
 (window as any).scopes = scopes;
 
-for (const tag of tags) {
-  (window as any)[tag] = (
-    ...children: (HtmlTag | string | (() => HtmlTag | string))[]
-  ) => {
-    const newTag = new HtmlTag(
-      tag,
-      ...children.map((child) => {
-        if (typeof child === "string") {
-          const t = new HtmlTag(tag, [] as any);
-          t.text = child;
-          return t;
-        }
-        return child;
-      }),
-    );
-    newTag.create();
-    return newTag;
-  };
+const tagsList: Tag[] = [
+  "a",
+  "div",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "p",
+  "button",
+  "img",
+];
 
-  (window as any)[`$${tag}`] = (...children: (HtmlTag | string)[]) => {
-    return ReactiveHtmlTag.create(() => {
-      const newTag = new ReactiveHtmlTag(tag, ...children);
+const makeTags = () => {
+  for (const tag of tagsList) {
+    (window as any)[tag] = (...children: ChildType[]) => {
+      const newTag = new HtmlTag(tag, ...children);
       newTag.create();
       return newTag;
-    });
-  };
+    };
+
+    (window as any)[`$${tag}`] = (...children: ChildType[]) => {
+      return ReactiveHtmlTag.create(() => {
+        const newTag = new ReactiveHtmlTag(tag, ...children);
+        newTag.create();
+        return newTag;
+      });
+    };
+  }
+};
+
+makeTags();
+
+function isReactive(tag: AnyHtmlTag): tag is ReactiveHtmlTag {
+  return tag.reactive;
 }
 
 class HtmlTag {
@@ -107,10 +90,13 @@ class HtmlTag {
     }
   }
 
+  // Does not clear the scopes of the children. If using destroy with potential reactive children,
+  // ensure scopes are handled properly
   public destroy() {
     while (this.element.firstChild) {
       this.element.removeChild(this.element.firstChild);
     }
+    this.element.remove();
   }
 
   public handle(handlerType: string, handler: (element: HtmlTag) => void) {
@@ -124,16 +110,19 @@ class HtmlTag {
   }
 
   public class(className: string) {
+    if (className === "") {
+      return this;
+    }
     this.element.classList.add(className);
     return this;
   }
 }
 
 class ReactiveHtmlTag extends HtmlTag {
-  private tagMethod!: () => ReactiveHtmlTag;
+  private renderFunc!: () => ReactiveHtmlTag;
   private scopes: string[];
 
-  constructor(type: Tag, ...children: Array<HtmlTag | string>) {
+  constructor(type: Tag, ...children: ChildType[]) {
     super(type, ...children);
     this.reactive = true;
     this.scopes = [];
@@ -141,7 +130,7 @@ class ReactiveHtmlTag extends HtmlTag {
 
   public static create(tagMethod: () => ReactiveHtmlTag) {
     const tag = tagMethod();
-    tag.tagMethod = tagMethod;
+    tag.renderFunc = tagMethod;
     return tag;
   }
 
@@ -152,7 +141,7 @@ class ReactiveHtmlTag extends HtmlTag {
       }
     }
 
-    const newElement = ReactiveHtmlTag.create(this.tagMethod);
+    const newElement = ReactiveHtmlTag.create(this.renderFunc);
 
     this.children = newElement.children;
 
@@ -202,19 +191,15 @@ class ReactiveHtmlTag extends HtmlTag {
   ) {
     const cb = () => {
       handler(this);
-      let lastReactParent: HtmlTag | ReactiveHtmlTag = this;
-      let next: HtmlTag | ReactiveHtmlTag = this;
+      let lastReactParent: ReactiveHtmlTag = this;
+      let next: AnyHtmlTag = this;
       while (next.parent !== null) {
-        if (next.reactive) {
+        if (isReactive(next)) {
           lastReactParent = next!;
         }
         next = next.parent;
       }
-      if (lastReactParent !== this) {
-        (lastReactParent as ReactiveHtmlTag).react();
-      } else {
-        console.error("No parent to react");
-      }
+      lastReactParent.react();
     };
 
     this.element.addEventListener(handlerType, cb);
@@ -243,48 +228,60 @@ class ReactiveHtmlTag extends HtmlTag {
 
 class Router {
   public routes: Record<string, () => HtmlTag | ReactiveHtmlTag>;
-  public mounted: HtmlTag | ReactiveHtmlTag;
+  public mounted!: HtmlTag | ReactiveHtmlTag;
+  public path!: string;
+  public mountedRoute!: string;
+  private SLUG_FALLBACK: string;
 
-  constructor(routes: Record<string, () => HtmlTag | ReactiveHtmlTag>) {
+  constructor(
+    routes: Record<
+      string,
+      (slugs?: Record<string, string>) => HtmlTag | ReactiveHtmlTag
+    >,
+  ) {
+    this.SLUG_FALLBACK = "$$Slug";
     this.routes = routes;
-    this.mounted = routes["/"]
-      ? routes["/"]()
-      : routes["404"]
-        ? routes["404"]()
-        : div("404 Not Found");
 
-    const hashChangeEvent = new HashChangeEvent("hashchange", {
-      newURL: "/",
-      oldURL: "",
-    });
-
-    window.dispatchEvent(hashChangeEvent);
     window.addEventListener("hashchange", () => {
+      this.path = window.location.hash.slice(1);
       this.route();
     });
+
+    this.path = window.location.hash.slice(1);
+    if (!this.path && this.routes["/"]) {
+      this.path = "/";
+      this.mountedRoute = "/";
+    }
+
+    this.mounted = this.routes[this.path]
+      ? this.routes[this.path]()
+      : this.routes[404]
+        ? this.routes[404]()
+        : div("404 Not Found");
   }
 
   public route() {
-    const path = window.location.hash.slice(1);
     scopes = {};
 
-    if (this.routes[path]) {
+    if (this.routes[this.path]) {
       this.mounted.destroy();
-      this.mounted = this.routes[path]();
-      this.mounted.create();
+      this.mounted = this.routes[this.path]();
     } else {
       this.mounted.destroy();
       this.mounted = this.routes["404"]
         ? this.routes["404"]()
         : div("404 Not Found");
-      this.mounted.create();
     }
 
     document.getElementById("main")!.appendChild(this.mounted.element);
   }
 
-  public mount(element: HtmlTag | ReactiveHtmlTag) {
-    this.mounted = element;
+  private createNestedRoutes() {
+    for (const route of Object.keys(this.routes)) {
+      const split = route.split("/");
+      for (const path in split) {
+      }
+    }
   }
 }
 
@@ -296,19 +293,29 @@ const withRouter = (
 };
 
 let count = 0;
+let shouldRotate = false;
+
 const results = withRouter({
   "/": () =>
     div(
-      div(() => {
+      div(
+        $div(() => [`The Current Count is ${count}`]).scope("count"),
+        $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
+          count++;
+        }),
+      ),
+      $div(() => {
         return [
-          $div(() => [`The Current Count is ${count}`]).scope("count"),
-          $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
-            count++;
-          }),
+          $img()
+            .attr("src", "https://picsum.photos/200/300")
+            .$$handle(["rotate"], "click", () => {
+              shouldRotate = !shouldRotate;
+            })
+            .class(shouldRotate ? "rotate" : ""),
         ];
-      }),
-      div(a("click me to go to test").attr("href", "#/test")).class("red"),
-      $div(() => [`Distant Count ${count}`]).scope("count"),
+      }).scope("rotate"),
+      a("Nav to test").attr("href", "#/test"),
+      $div(() => [`this is my count ${count}`]).scope("count"),
     ),
   "/test": () =>
     div(
@@ -320,7 +327,7 @@ const results = withRouter({
   "404": () =>
     div(
       "This is what it would be like if there was a custom 404 page",
-      div(a("Go home").attr("href", "/")),
+      div(a("Go home").attr("href", "#/")),
     ),
 });
 
