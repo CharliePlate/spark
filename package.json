@@ -7,5 +7,10 @@
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev-watch": "tsc -w",
+    "live-server": "live-server --port=8080 --entry-file=public/index.html"
   }
 }

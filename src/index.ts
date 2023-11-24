@@ -314,7 +314,7 @@ class Router {
     } else {
       this.navigate(
         this.parsedRoute["404"]
-          ? (this.parsedRoute as any)["404"][ROUTER_RENDER_KEY]
+          ? this.parsedRoute["404"][ROUTER_RENDER_KEY]
           : () => div("404 Not Found"),
       );
     }
