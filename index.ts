@@ -1,6 +1,10 @@
 let scopes: Record<string, Set<ReactiveHtmlTag>> = {};
 (window as any).scopes = scopes;
 
+const ROUTER_RENDER_KEY = "$$RENDER";
+const ROUTER_SLUG_KEY = "$$SLUG_NAME";
+const ROUTER_SLUG_FALLBACK = "$$Slug";
+
 const tagsList: Tag[] = [
   "a",
   "div",
@@ -12,6 +16,7 @@ const tagsList: Tag[] = [
   "p",
   "button",
   "img",
+  "input",
 ];
 
 const makeTags = () => {
@@ -38,8 +43,20 @@ function isReactive(tag: AnyHtmlTag): tag is ReactiveHtmlTag {
   return tag.reactive;
 }
 
-class HtmlTag {
-  public element!: HTMLElement;
+function isRenderer(
+  route: ParsedRoute,
+): route is ParsedRoute & { [ROUTER_RENDER_KEY]: RouteFunction } {
+  return route[ROUTER_RENDER_KEY] !== undefined;
+}
+
+function isSlugFallback(
+  route: ParsedRouteFunction | ParsedRoute | RouteWithSlug,
+): route is RouteWithSlug {
+  return ROUTER_SLUG_FALLBACK in route;
+}
+
+class HtmlTag<T extends ElementType = ElementType> {
+  public element!: T;
   public reactive: boolean;
   public children: Array<HtmlTag | ReactiveHtmlTag>;
   public parent: HtmlTag | ReactiveHtmlTag | null = null;
@@ -59,7 +76,7 @@ class HtmlTag {
         if (Array.isArray(result)) {
           for (const r of result) {
             if (typeof r === "string") {
-              const t = new HtmlTag(type, [] as any);
+              const t = new HtmlTag(type);
               t.text = r;
               this.children.push(t);
             } else {
@@ -68,7 +85,7 @@ class HtmlTag {
           }
         }
       } else if (typeof child === "string") {
-        const t = new HtmlTag(type, [] as any);
+        const t = new HtmlTag(type);
         t.text = child;
         this.children.push(t);
       } else {
@@ -78,7 +95,7 @@ class HtmlTag {
   }
 
   public create() {
-    this.element = document.createElement(this.type);
+    this.element = document.createElement(this.type) as T;
 
     for (const child of this.children) {
       if (child.text) {
@@ -99,7 +116,7 @@ class HtmlTag {
     this.element.remove();
   }
 
-  public handle(handlerType: string, handler: (element: HtmlTag) => void) {
+  public handle(handlerType: string, handler: (element: AnyHtmlTag) => void) {
     this.element.addEventListener(handlerType, () => handler(this));
     return this;
   }
@@ -118,8 +135,8 @@ class HtmlTag {
   }
 }
 
-class ReactiveHtmlTag extends HtmlTag {
-  private renderFunc!: () => ReactiveHtmlTag;
+class ReactiveHtmlTag<T extends ElementType = ElementType> extends HtmlTag<T> {
+  private renderFunc!: () => ReactiveHtmlTag<T>;
   private scopes: string[];
 
   constructor(type: Tag, ...children: ChildType[]) {
@@ -128,9 +145,9 @@ class ReactiveHtmlTag extends HtmlTag {
     this.scopes = [];
   }
 
-  public static create(tagMethod: () => ReactiveHtmlTag) {
-    const tag = tagMethod();
-    tag.renderFunc = tagMethod;
+  public static create(render: () => ReactiveHtmlTag) {
+    const tag = render();
+    tag.renderFunc = render;
     return tag;
   }
 
@@ -187,7 +204,7 @@ class ReactiveHtmlTag extends HtmlTag {
 
   public $handle(
     handlerType: string,
-    handler: (element: ReactiveHtmlTag) => void,
+    handler: (element: ReactiveHtmlTag<T>) => void,
   ) {
     const cb = () => {
       handler(this);
@@ -210,7 +227,7 @@ class ReactiveHtmlTag extends HtmlTag {
   public $$handle(
     emitTo: string[],
     handlerType: string,
-    handler: (element: ReactiveHtmlTag) => void,
+    handler: (element: ReactiveHtmlTag<T>) => void,
   ) {
     const cb = () => {
       handler(this);
@@ -227,20 +244,18 @@ class ReactiveHtmlTag extends HtmlTag {
 }
 
 class Router {
-  public routes: Record<string, () => HtmlTag | ReactiveHtmlTag>;
-  public mounted!: HtmlTag | ReactiveHtmlTag;
+  public routes: Routes;
+  public parsedRoute: ParsedRoute;
+  public mounted!: AnyHtmlTag;
   public path!: string;
   public mountedRoute!: string;
-  private SLUG_FALLBACK: string;
 
   constructor(
-    routes: Record<
-      string,
-      (slugs?: Record<string, string>) => HtmlTag | ReactiveHtmlTag
-    >,
+    routes: Record<string, (slugs?: Record<string, string>) => AnyHtmlTag>,
   ) {
-    this.SLUG_FALLBACK = "$$Slug";
+    this.parsedRoute = {};
     this.routes = routes;
+    this.createNestedRoutes();
 
     window.addEventListener("hashchange", () => {
       this.path = window.location.hash.slice(1);
@@ -263,63 +278,153 @@ class Router {
   public route() {
     scopes = {};
 
-    if (this.routes[this.path]) {
-      this.mounted.destroy();
-      this.mounted = this.routes[this.path]();
-    } else {
-      this.mounted.destroy();
-      this.mounted = this.routes["404"]
-        ? this.routes["404"]()
-        : div("404 Not Found");
+    const split = this.path.split("/").filter((path) => path !== "");
+    let curr = this.parsedRoute;
+    const slugs: RouteSlugs = {};
+
+    if (split.length === 0) {
+      this.navigate(
+        this.parsedRoute["/"]
+          ? this.parsedRoute["/"][ROUTER_RENDER_KEY]
+          : () => div("404 Not Found"),
+      );
+      return;
     }
+
+    for (const path of split) {
+      if (!curr[path]) {
+        if (isSlugFallback(curr)) {
+          slugs[(curr as any)[ROUTER_SLUG_FALLBACK][ROUTER_SLUG_KEY]] = path;
+          curr = curr[ROUTER_SLUG_FALLBACK] as ParsedRoute;
+        } else {
+          this.navigate(
+            this.parsedRoute["404"]
+              ? this.parsedRoute["404"][ROUTER_RENDER_KEY]
+              : () => div("404 Not Found"),
+          );
+        }
+      } else {
+        curr = curr[path] as ParsedRoute;
+      }
+    }
+
+    if (isRenderer(curr)) {
+      this.mountedRoute = this.path;
+      this.navigate(curr[ROUTER_RENDER_KEY], slugs);
+    } else {
+      this.navigate(
+        this.parsedRoute["404"]
+          ? (this.parsedRoute as any)["404"][ROUTER_RENDER_KEY]
+          : () => div("404 Not Found"),
+      );
+    }
+  }
+
+  private navigate(route: RouteFunction, slugs?: RouteSlugs) {
+    const r = route(slugs);
+    this.mounted.destroy();
+    this.mounted = r;
+    this.mounted.create();
 
     document.getElementById("main")!.appendChild(this.mounted.element);
   }
 
   private createNestedRoutes() {
     for (const route of Object.keys(this.routes)) {
-      const split = route.split("/");
-      for (const path in split) {
+      if (route === "/") {
+        this.parsedRoute[route] = {
+          [ROUTER_RENDER_KEY]: this.routes[route],
+        };
+        continue;
       }
+      let curr = this.parsedRoute;
+      const split = route.split("/");
+      split.forEach((path, index) => {
+        if (path === "") {
+          return;
+        }
+        const isSlug = path.startsWith(":");
+        const key = isSlug ? ROUTER_SLUG_FALLBACK : path;
+
+        if (index === split.length - 1) {
+          if (isSlug) {
+            curr[key] = {
+              [ROUTER_SLUG_KEY]: path.slice(1),
+              [ROUTER_RENDER_KEY]: this.routes[route],
+            };
+          } else {
+            curr[key] = {
+              [ROUTER_RENDER_KEY]: this.routes[route],
+            };
+          }
+        } else {
+          if (isSlug) {
+            curr[key] = {
+              ...curr[key],
+              [ROUTER_SLUG_FALLBACK]: {},
+              [ROUTER_SLUG_KEY]: path.slice(1),
+            };
+          } else {
+            curr[key] = { ...curr[key] };
+          }
+        }
+        curr = curr[key] as ParsedRoute;
+      });
     }
   }
 }
 
-const withRouter = (
-  routes: Record<string, () => HtmlTag | ReactiveHtmlTag>,
-): HtmlTag | ReactiveHtmlTag => {
+const withRouter = (routes: Routes): AnyHtmlTag => {
   const router = new Router(routes);
   return router.mounted;
 };
 
 let count = 0;
-let shouldRotate = false;
+let savedTest = "";
 
 const results = withRouter({
   "/": () =>
-    div(
-      div(
-        $div(() => [`The Current Count is ${count}`]).scope("count"),
-        $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
-          count++;
-        }),
-      ),
-      $div(() => {
-        return [
-          $img()
-            .attr("src", "https://picsum.photos/200/300")
-            .$$handle(["rotate"], "click", () => {
-              shouldRotate = !shouldRotate;
-            })
-            .class(shouldRotate ? "rotate" : ""),
-        ];
-      }).scope("rotate"),
-      a("Nav to test").attr("href", "#/test"),
-      $div(() => [`this is my count ${count}`]).scope("count"),
-    ),
-  "/test": () =>
+    div(() => {
+      let test = "";
+      let shouldRotate = false;
+      return [
+        div(
+          $div(() => [`The Current Count is ${count}`]).scope("count"),
+          $button(() => ["Click Me"]).$$handle(["count"], "click", () => {
+            count++;
+          }),
+        ),
+        $div(() => {
+          return [
+            $img()
+              .attr("src", "https://picsum.photos/200/300")
+              .$$handle(["rotate"], "click", () => {
+                shouldRotate = !shouldRotate;
+              })
+              .class(shouldRotate ? "rotate" : ""),
+          ];
+        }).scope("rotate"),
+        a("Nav to test").attr("href", "#/test"),
+        $div(() => [`this is my count ${count}`]).scope("count"),
+        div(
+          $div(() => [`This is my input ${test}`]).scope("inputchange"),
+          $input()
+            .attr("value", savedTest)
+            .$$handle(["inputchange"], "input", (element) => {
+              test = element.element.value;
+            }),
+          $button(() => ["Save Test"]).handle("click", () => {
+            savedTest = test;
+          }),
+        ),
+      ];
+    }),
+  "/test": () => div("here"),
+  "/test/:test123/:test1234": (slugs) =>
     div(
       "test",
+      div(`Slug 1 is ${slugs?.test123}`),
+      div(`Slug 2 is ${slugs?.test1234}`),
       a("Nav to home").attr("href", "#/"),
       a("Go to something unknown").attr("href", "#/unknown"),
       `${count}`,
